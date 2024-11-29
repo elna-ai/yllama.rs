@@ -31,8 +31,8 @@ pub struct Llama<
     D,
     T: Float + Matmul,
     TokenEmbd,
-    Output,
     OutputNorm,
+    RoPE,
     AttnK,
     AttnQ,
     AttnV,
@@ -47,6 +47,7 @@ pub struct Llama<
     const FF: usize,
     const KV: usize,
     const CONTEXT: usize,
+    const FREQ: usize,
     Xb = VecStore<T>,
     Xb2 = VecStore<T>,
     Hb = VecStore<T>,
@@ -56,6 +57,9 @@ pub struct Llama<
     VCache = VecStore<T>,
     AttnScore = VecStore<T>,
 > where
+    TokenEmbd: TensorTypes<T, M<EMBED, VOCAB>>,
+    OutputNorm: TensorTypes<T, V<EMBED>>,
+    RoPE: TensorTypes<T, V<FREQ>>,
     AttnQ: TensorTypes<T, M<EMBED, EMBED>>,
     AttnK: TensorTypes<T, M<EMBED, KV>>,
     AttnV: TensorTypes<T, M<EMBED, KV>>,
@@ -65,9 +69,6 @@ pub struct Llama<
     FfnDown: TensorTypes<T, M<FF, EMBED>>,
     FfnNorm: TensorTypes<T, V<EMBED>>,
     FfnGate: TensorTypes<T, M<EMBED, FF>>,
-    TokenEmbd: TensorTypes<T, M<EMBED, VOCAB>>,
-    Output: TensorTypes<T, M<EMBED, VOCAB>>,
-    OutputNorm: TensorTypes<T, V<EMBED>>,
     Xb: TensorTypes<T, V<EMBED>>,
     Xb2: TensorTypes<T, V<EMBED>>,
     Hb: TensorTypes<T, V<FF>>,
@@ -109,13 +110,12 @@ pub struct Llama<
         >,
     >,
     token_embd: Tensor2Imm<'a, T, EMBED, VOCAB, TokenEmbd>,
-    output: Tensor2Imm<'a, T, EMBED, VOCAB, Output>,
     output_norm: VectorImm<'a, T, EMBED, OutputNorm>,
+    rope_freq: VectorImm<'a, T, FREQ, RoPE>,
     tokenizer: Tokenizer,
 }
 
 // LlamaBlock
-
 #[allow(dead_code)]
 pub struct LlamaBlock<
     'a,
@@ -502,11 +502,11 @@ where
         );
 
         let attn_head_size = self.params.embedding_length / self.params.attention_head_count;
-        let kv_mul = 4; // TODO: remove hardcoded
-        debug_assert!(attn_head_size == 128);
+        let group_size = self.params.attention_head_count / self.params.attention_head_count_kv;
 
-        // q, v and k for this position
+        // println!("Head Dim: {}, Group_size: {}", attn_head_size, group_size);
         let q = &mut self.q;
+
         {
             let k = &mut self.k_cache.row(pos);
             let v = &mut self.v_cache.row(pos);
@@ -526,14 +526,17 @@ where
                             self.params.rope_freq_base,
                             T::from(j).unwrap() / T::from(attn_head_size).unwrap(),
                         );
+                    // println!("i: {} ,j: {}, Freq: {:?}", i, j, freq);
                     let val = T::from(pos).unwrap() * freq;
                     let fcr = T::cos(val);
                     let fci = T::sin(val);
+                    // println!("Test: {:?}", i * attn_head_size + j);
                     let q0 = qw.get(i * attn_head_size + j);
                     let q1 = qw.get(i * attn_head_size + j + 1);
                     qw.set(i * attn_head_size + j, q0 * fcr - q1 * fci);
                     qw.set(i * attn_head_size + j + 1, q0 * fci + q1 * fcr);
                     if i < self.params.attention_head_count_kv {
+                        // println!("Test: {:?}", i * attn_head_size + j);
                         let k0 = kw.get(i * attn_head_size + j);
                         let k1 = kw.get(i * attn_head_size + j + 1);
                         kw.set(i * attn_head_size + j, k0 * fcr - k1 * fci);
@@ -554,7 +557,7 @@ where
                     let qw = q.writer();
                     let k = &mut self.k_cache.row(t);
                     let kw = k.writer();
-                    let k_offset = (h / kv_mul) * attn_head_size;
+                    let k_offset = (h / group_size) * attn_head_size;
                     for i in 0..attn_head_size {
                         score = score + qw.get(q_offset + i) * kw.get(k_offset + i);
                     }
@@ -579,7 +582,7 @@ where
                     let a = attn_score_w.get(t);
                     let v = &mut self.v_cache.row(t);
                     let v_w = v.writer();
-                    let v_offset = (h / kv_mul) * attn_head_size;
+                    let v_offset = (h / group_size) * attn_head_size;
                     // Weighted value
                     for i in 0..attn_head_size {
                         xbw.set(
@@ -637,8 +640,8 @@ impl<
         D,
         T: Float + Matmul,
         TokenEmbd,
-        Output,
         OutputNorm,
+        RoPE,
         AttnK,
         AttnQ,
         AttnV,
@@ -653,6 +656,7 @@ impl<
         const FF: usize,
         const KV: usize,
         const CONTEXT: usize,
+        const FREQ: usize,
         Xb,
         Xb2,
         Hb,
@@ -668,8 +672,8 @@ impl<
         D,
         T,
         TokenEmbd,
-        Output,
         OutputNorm,
+        RoPE,
         AttnK,
         AttnQ,
         AttnV,
@@ -684,6 +688,7 @@ impl<
         FF,
         KV,
         CONTEXT,
+        FREQ,
         Xb,
         Xb2,
         Hb,
@@ -764,13 +769,12 @@ where
     Tensor<'a, false, T, M<EMBED, VOCAB>, TokenEmbd>:
         Instantiable<TA, (&'a D, String)> + TReader<T, M<EMBED, VOCAB>>,
 
-    Output: TensorTypes<T, M<EMBED, VOCAB>>,
-    Tensor<'a, false, T, M<EMBED, VOCAB>, Output>:
-        Instantiable<TA, (&'a D, String)> + TReader<T, M<EMBED, VOCAB>>,
-
     OutputNorm: TensorTypes<T, V<EMBED>>,
     Tensor<'a, false, T, V<EMBED>, OutputNorm>:
         Instantiable<TA, (&'a D, String)> + TReader<T, V<EMBED>>,
+
+    RoPE: TensorTypes<T, V<FREQ>>,
+    Tensor<'a, false, T, V<FREQ>, RoPE>: Instantiable<TA, (&'a D, String)> + TReader<T, V<FREQ>>,
 
     LlamaParams<T>: Instantiable<TA, &'a D>,
 {
@@ -791,23 +795,21 @@ where
         }
 
         let token_embd = Instantiable::instantiate((model, "token_embd.weight".to_string()))?;
-        let output = Instantiable::instantiate((model, "output.weight".to_string()))?;
         let output_norm = Instantiable::instantiate((model, "output_norm.weight".to_string()))?;
+        let rope_freq = Instantiable::instantiate((model, "rope_freqs.weight".to_string()))?;
 
         let blocks: Result<Vec<_>, anyhow::Error> = (0..params.block_count)
             .into_iter()
             .map(|i| LlamaBlock::instantiate((model, i, params)))
             .collect();
-
         let blocks = blocks?;
 
         Ok(Llama {
             params,
             blocks,
             token_embd,
-            output,
             output_norm,
-            // tokens,
+            rope_freq,
             tokenizer,
         })
     }
@@ -819,8 +821,8 @@ impl<
         D: 'a,
         T: Float + Matmul,
         TokenEmbd,
-        Output,
         OutputNorm,
+        RoPE,
         AttnK,
         AttnQ,
         AttnV,
@@ -835,6 +837,7 @@ impl<
         const FF: usize,
         const KV: usize,
         const CONTEXT: usize,
+        const FREQ: usize,
         Xb,
         Xb2,
         Hb,
@@ -850,8 +853,8 @@ impl<
         D,
         T,
         TokenEmbd,
-        Output,
         OutputNorm,
+        RoPE,
         AttnK,
         AttnQ,
         AttnV,
@@ -866,6 +869,7 @@ impl<
         FF,
         KV,
         CONTEXT,
+        FREQ,
         Xb,
         Xb2,
         Hb,
@@ -947,13 +951,11 @@ where
         + TReader<T, M<EMBED, VOCAB>>
         + Rowable<T, EMBED, VOCAB, TokenEmbd>,
 
-    Output: TensorTypes<T, M<EMBED, VOCAB>>,
-    Tensor<'a, false, T, M<EMBED, VOCAB>, Output>:
-        Instantiable<TA, (&'a D, String)> + TReader<T, M<EMBED, VOCAB>>,
-
     OutputNorm: TensorTypes<T, V<EMBED>>,
     Tensor<'a, false, T, V<EMBED>, OutputNorm>:
         Instantiable<TA, (&'a D, String)> + TReader<T, V<EMBED>>,
+    RoPE: TensorTypes<T, V<FREQ>>,
+    Tensor<'a, false, T, V<FREQ>, RoPE>: Instantiable<TA, (&'a D, String)> + TReader<T, V<FREQ>>,
 {
     fn block_count(&self) -> usize {
         self.params.block_count
@@ -964,15 +966,16 @@ where
         Ok(r.get_ids().iter().map(|t| *t).collect())
     }
 
-    fn embed(&mut self, x: &mut VectorMut<T, EMBED>, token: u32, _pos: usize) {
-        cp(x, &mut self.token_embd.row(token as usize))
-    }
-
     fn decode(&self, tokens: &Vec<u32>) -> String {
         self.tokenizer.decode(tokens, false).unwrap()
     }
 
+    fn embed(&mut self, x: &mut VectorMut<T, EMBED>, token: u32, _pos: usize) {
+        cp(x, &mut self.token_embd.row(token as usize))
+    }
+
     unsafe fn forward(&mut self, x: &mut VectorMut<T, EMBED>, pos: usize) {
+        // println!("{:?}", x.store.len());
         self.blocks
             .iter_mut()
             .for_each(|block| block.forward(x, pos));
@@ -992,7 +995,7 @@ where
             self.params.attention_layer_norm_rms_epsilon,
         );
         // Last act: logits
-        Matmul::matmul(logits, &self.output, &x2);
+        Matmul::matmul(logits, &self.token_embd, &x2);
     }
 }
 
@@ -1003,8 +1006,8 @@ pub fn llama_find_type(model: &ModelFile) -> Result<&str, anyhow::Error> {
     };
 
     let token_embd = find("token_embd.weight")?;
-    let output = find("output.weight")?;
-    println!("{:?}", output);
+    // let output = find("output.weight")?;
+    // println!("{:?}", output);
     if token_embd == GGMLType::F32 {
         Ok("F32")
     } else {

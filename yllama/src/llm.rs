@@ -37,6 +37,7 @@ where
             chat.push(next_token);
             println!("{}", self.decode(&chat));
             self.embed(&mut x, next_token, pos);
+            // self.block_forward(&mut x, pos, 0);
             self.forward(&mut x, pos);
             self.logits(&mut logits, &mut x);
             let (tk, _) = max(&mut logits);

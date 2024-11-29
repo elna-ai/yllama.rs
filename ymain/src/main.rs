@@ -157,7 +157,6 @@ fn process(
     path: &str,
     tokenizer_path: &str,
     prompt: &str,
-    _clone: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (arch, name, gguf) = load_fast(path)?;
 
@@ -172,67 +171,42 @@ fn process(
             type C = VecStore<f32>;
             type D = VecStore<f16>;
             let typ = yllama::llama::llama_find_type(&model)?;
-            const EMBED: usize = 4096;
+            const EMBED: usize = 2048;
             const VOCAB: usize = 128256;
-            const FF: usize = 14336;
-            const KV: usize = 1024;
+            const FF: usize = 8192;
+            const KV: usize = 512;
             const CONTEXT: usize = 2048;
+            const FREQ: usize = 32;
             match typ {
                 "F16" => {
                     type LlamaType<'a> = Llama<
                         'a,
-                        VIRTUALMEM,
-                        ModelFile,
-                        f32,
-                        D,
-                        D,
-                        C,
-                        D,
-                        D,
-                        D,
-                        C,
-                        D,
-                        D,
-                        C,
-                        D,
-                        D,
+                        VIRTUALMEM, //TA
+                        ModelFile,  //D
+                        f32,        //T
+                        D,          //TokenEmbd
+                        C,          //RoPE
+                        C,          //OutputNorm
+                        D,          //AttnK
+                        D,          //AttnQ
+                        D,          //AttnV
+                        C,          //AttnNorm
+                        D,          //FfnDown
+                        D,          //FfnGate
+                        C,          //FfnNorm
+                        D,          //FfnUp
+                        D,          //AttnOutput
                         EMBED,
                         VOCAB,
                         FF,
                         KV,
                         CONTEXT,
+                        FREQ,
                     >;
                     let mut runnable: LlamaType = Llama::instantiate((&model, tokenizer_path))?;
                     unsafe { runnable.run(prompt) }
                 }
-                "F32" => {
-                    type LlamaType<'a> = Llama<
-                        'a,
-                        VIRTUALMEM,
-                        ModelFile,
-                        f32,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        A,
-                        EMBED,
-                        VOCAB,
-                        FF,
-                        KV,
-                        CONTEXT,
-                    >;
-                    let mut runnable: LlamaType =
-                        Instantiable::instantiate((&model, tokenizer_path))?;
-                    unsafe { runnable.run(prompt) }
-                }
+
                 _ => Err(anyhow!("Unknown configuration").into()),
             }
         }
@@ -274,7 +248,12 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let result = process(&args.file, &args.tokenizer, &args.prompt, args.clone);
+    // let result = process(
+    //     "../../../model/Llama-3.2-1B-Instruct-f16.gguf",
+    //     "../../../model/tokenizer.json",
+    //     "What is Llama Eat? ",
+    // );
+    let result = process(&args.file, &args.tokenizer, &args.prompt);
 
     match result {
         Err(e) => {
